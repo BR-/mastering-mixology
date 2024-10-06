@@ -30,6 +30,7 @@ import work.fking.masteringmixology.evaluator.PotionOrderEvaluator.EvaluatorCont
 import javax.inject.Inject;
 import java.awt.Color;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -59,6 +60,10 @@ public class MasteringMixologyPlugin extends Plugin {
     private static final int VARP_LYE_RESIN = 4414;
     private static final int VARP_AGA_RESIN = 4415;
     private static final int VARP_MOX_RESIN = 4416;
+
+    private static final int VARBIT_MIXING_INPUT_1 = 11326;
+    private static final int VARBIT_MIXING_INPUT_2 = 11325;
+    private static final int VARBIT_MIXING_INPUT_3 = 11324;
 
     private static final int VARBIT_MIXING_VESSEL_POTION = 11339;
     private static final int VARBIT_AGITATOR_POTION = 11340;
@@ -97,6 +102,9 @@ public class MasteringMixologyPlugin extends Plugin {
     @Inject
     private InventoryPotionOverlay potionOverlay;
 
+    @Inject
+    private MasteringMixologyOverlayPanel overlayPanel;
+
     private final Map<AlchemyObject, HighlightedObject> highlightedObjects = new LinkedHashMap<>();
     private List<PotionOrder> potionOrders = Collections.emptyList();
     private PotionOrder bestPotionOrder;
@@ -106,12 +114,31 @@ public class MasteringMixologyPlugin extends Plugin {
     private PotionType agitatorPotionType;
     private PotionType retortPotionType;
 
+    private List<PotionComponent> mixerComponents = Arrays.asList(null, null, null);
+
+    private List<PotionOrder> bestPotionOrderSequence = Collections.emptyList();
+    private int bestPotionOrderMixIndex = 0;
+    private int bestPotionOrderModifyIndex = 0;
+    private boolean hintArrowNeedsUpdate = true;
+
     public Map<AlchemyObject, HighlightedObject> highlightedObjects() {
         return highlightedObjects;
     }
 
     public boolean isInLab() {
         return inLab;
+    }
+
+    public List<PotionOrder> getPotionOrderSequence() {
+        return bestPotionOrderSequence;
+    }
+
+    public int getMixIndex() {
+        return bestPotionOrderMixIndex;
+    }
+
+    public int getModifyIndex() {
+        return bestPotionOrderModifyIndex;
     }
 
     @Provides
@@ -123,6 +150,7 @@ public class MasteringMixologyPlugin extends Plugin {
     protected void startUp() {
         overlayManager.add(overlay);
         overlayManager.add(potionOverlay);
+        overlayManager.add(overlayPanel);
 
         if (client.getGameState() == GameState.LOGGED_IN) {
             clientThread.invokeLater(this::initialize);
@@ -133,6 +161,7 @@ public class MasteringMixologyPlugin extends Plugin {
     protected void shutDown() {
         overlayManager.remove(overlay);
         overlayManager.remove(potionOverlay);
+        overlayManager.remove(overlayPanel);
         inLab = false;
     }
 
@@ -140,6 +169,8 @@ public class MasteringMixologyPlugin extends Plugin {
     public void onGameStateChanged(GameStateChanged event) {
         if (event.getGameState() == GameState.LOGIN_SCREEN || event.getGameState() == GameState.HOPPING) {
             highlightedObjects.clear();
+            mixerComponents = Arrays.asList(null, null, null);
+            client.clearHintArrow();
         }
     }
 
@@ -159,6 +190,8 @@ public class MasteringMixologyPlugin extends Plugin {
         }
 
         highlightedObjects.clear();
+        mixerComponents = Arrays.asList(null, null, null);
+        client.clearHintArrow();
         inLab = false;
     }
 
@@ -231,9 +264,40 @@ public class MasteringMixologyPlugin extends Plugin {
             } else {
                 clientThread.invokeAtTickEnd(this::updatePotionOrders);
             }
+        } else if (varbitId == VARBIT_MIXING_INPUT_1) {
+            mixerComponents.set(0, PotionComponent.from(value - 1));
+            if (hintArrowNeedsUpdate) {
+                clientThread.invokeAtTickEnd(this::updateHintArrow);
+                hintArrowNeedsUpdate = false;
+            }
+        } else if (varbitId == VARBIT_MIXING_INPUT_2) {
+            mixerComponents.set(1, PotionComponent.from(value - 1));
+            if (hintArrowNeedsUpdate) {
+                clientThread.invokeAtTickEnd(this::updateHintArrow);
+                hintArrowNeedsUpdate = false;
+            }
+        } else if (varbitId == VARBIT_MIXING_INPUT_3) {
+            mixerComponents.set(2, PotionComponent.from(value - 1));
+            if (hintArrowNeedsUpdate) {
+                clientThread.invokeAtTickEnd(this::updateHintArrow);
+                hintArrowNeedsUpdate = false;
+            }
+        } else if (varbitId == VARBIT_MIXING_VESSEL_POTION) {
+            if (value == 0) {
+                bestPotionOrderMixIndex++;
+                if (hintArrowNeedsUpdate) {
+                    clientThread.invokeAtTickEnd(this::updateHintArrow);
+                    hintArrowNeedsUpdate = false;
+                }
+            }
         } else if (varbitId == VARBIT_ALEMBIC_POTION) {
             if (value == 0) {
                 // Finished crystalising
+                bestPotionOrderModifyIndex++;
+                if (hintArrowNeedsUpdate) {
+                    clientThread.invokeAtTickEnd(this::updateHintArrow);
+                    hintArrowNeedsUpdate = false;
+                }
                 unHighlightObject(AlchemyObject.ALEMBIC);
                 tryFulfillOrder(alembicPotionType, PotionModifier.CRYSTALISED);
                 tryHighlightNextStation();
@@ -246,6 +310,11 @@ public class MasteringMixologyPlugin extends Plugin {
         } else if (varbitId == VARBIT_AGITATOR_POTION) {
             if (value == 0) {
                 // Finished homogenising
+                bestPotionOrderModifyIndex++;
+                if (hintArrowNeedsUpdate) {
+                    clientThread.invokeAtTickEnd(this::updateHintArrow);
+                    hintArrowNeedsUpdate = false;
+                }
                 unHighlightObject(AlchemyObject.AGITATOR);
                 tryFulfillOrder(agitatorPotionType, PotionModifier.HOMOGENOUS);
                 tryHighlightNextStation();
@@ -258,6 +327,11 @@ public class MasteringMixologyPlugin extends Plugin {
         } else if (varbitId == VARBIT_RETORT_POTION) {
             if (value == 0) {
                 // Finished concentrating
+                bestPotionOrderModifyIndex++;
+                if (hintArrowNeedsUpdate) {
+                    clientThread.invokeAtTickEnd(this::updateHintArrow);
+                    hintArrowNeedsUpdate = false;
+                }
                 unHighlightObject(AlchemyObject.RETORT);
                 tryFulfillOrder(retortPotionType, PotionModifier.CONCENTRATED);
                 tryHighlightNextStation();
@@ -439,11 +513,53 @@ public class MasteringMixologyPlugin extends Plugin {
             bestPotionOrder = strategy.evaluator().evaluate(evaluatorContext);
             LOGGER.debug("Best potion order: {}", bestPotionOrder);
         }
+
+        bestPotionOrderSequence = PotionSequencer.evaluateSequence(potionOrders);
+        bestPotionOrderMixIndex = 0;
+        bestPotionOrderModifyIndex = 0;
+        if (hintArrowNeedsUpdate) {
+            clientThread.invokeAtTickEnd(this::updateHintArrow);
+            hintArrowNeedsUpdate = false;
+        }
+
         // Trigger a fake varbit update to force run the clientscript proc
         var varbitType = client.getVarbit(VARBIT_POTION_ORDER_1);
 
         if (varbitType != null) {
             client.queueChangedVarp(varbitType.getIndex());
+        }
+    }
+
+    private void updateHintArrow() {
+        hintArrowNeedsUpdate = true;
+        LOGGER.debug("Best sequence: {}", bestPotionOrderSequence);
+        LOGGER.debug("Mix index: {}", bestPotionOrderMixIndex);
+        LOGGER.debug("Modify index: {}", bestPotionOrderModifyIndex);
+        LOGGER.debug("Mixer components: {}", mixerComponents);
+        if (bestPotionOrderMixIndex < bestPotionOrderSequence.size()) {
+            PotionComponent next = PotionSequencer.getNextInLeverSequence(bestPotionOrderSequence.get(bestPotionOrderMixIndex).potionType(), mixerComponents);
+            LOGGER.debug("Next C: {}", next);
+            if (next == null) {
+                client.setHintArrow(AlchemyObject.MIXING_VESSEL.coordinate());
+            } else if (next == PotionComponent.AGA) {
+                client.setHintArrow(AlchemyObject.AGA_LEVER.coordinate());
+            } else if (next == PotionComponent.MOX) {
+                client.setHintArrow(AlchemyObject.MOX_LEVER.coordinate());
+            } else if (next == PotionComponent.LYE) {
+                client.setHintArrow(AlchemyObject.LYE_LEVER.coordinate());
+            }
+        } else if (bestPotionOrderModifyIndex < bestPotionOrderSequence.size()) {
+            PotionModifier next = bestPotionOrderSequence.get(bestPotionOrderModifyIndex).potionModifier();
+            LOGGER.debug("Next M: {}", next);
+            if (next == PotionModifier.CONCENTRATED) {
+                client.setHintArrow(AlchemyObject.RETORT.coordinate());
+            } else if (next == PotionModifier.CRYSTALISED) {
+                client.setHintArrow(AlchemyObject.ALEMBIC.coordinate());
+            } else if (next == PotionModifier.HOMOGENOUS) {
+                client.setHintArrow(AlchemyObject.AGITATOR.coordinate());
+            }
+        } else {
+            client.setHintArrow(AlchemyObject.CONVEYOR_BELT.coordinate());
         }
     }
 
